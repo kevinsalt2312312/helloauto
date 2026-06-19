@@ -4,6 +4,7 @@ const {
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ModalBuilder, TextInputBuilder, TextInputStyle
 } = require('discord.js');
+
 const fs = require('fs');
 const fetch = (...a) => import('node-fetch').then(({ default: f }) => f(...a));
 
@@ -12,7 +13,7 @@ const fetch = (...a) => import('node-fetch').then(({ default: f }) => f(...a));
 // ─────────────────────────────────────
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CLIENT_ID = "1517632985342541864";
-const OWNER_ROLE_ID = "1517636202801529033"; // ROLE ID
+const OWNER_ROLE_ID = "1517636202801529033";
 // ─────────────────────────────────────
 
 const DB_FILE = "./data.json";
@@ -59,45 +60,75 @@ async function sendSelfMsg(userToken, channelId, message) {
 
     const data = await res.json();
     if (!res.ok) return { ok: false, error: data.message || JSON.stringify(data) };
-    return { ok: true, id: data.id };
+    return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };
   }
 }
 
+function scheduleJob(uid, cfg) {
+  stopJob(uid);
+
+  const run = async () => {
+    await sendSelfMsg(cfg.userToken, cfg.channelId, cfg.message);
+
+    const base = cfg.intervalMin * 60000;
+    const jitter = (Math.random() * 4 - 2) * 60000;
+
+    activeJobs[uid].timer = setTimeout(run, Math.max(base + jitter, 60000));
+  };
+
+  activeJobs[uid] = { ...cfg, timer: null };
+  run();
+}
+
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 // ─────────────────────────────────────
-// COMMANDS
+// SLASH COMMANDS
 // ─────────────────────────────────────
 const commands = [
   new SlashCommandBuilder()
     .setName('claim')
-    .setDescription('Claim key')
+    .setDescription('Claim a license key')
     .addStringOption(o =>
-      o.setName('key').setRequired(true)
+      o.setName('key')
+        .setDescription('Your key')
+        .setRequired(true)
     ),
 
-  new SlashCommandBuilder().setName('panel').setDescription('Panel'),
-  new SlashCommandBuilder().setName('status').setDescription('Status'),
-  new SlashCommandBuilder().setName('stop').setDescription('Stop'),
+  new SlashCommandBuilder()
+    .setName('panel')
+    .setDescription('Open control panel'),
+
+  new SlashCommandBuilder()
+    .setName('status')
+    .setDescription('Check status'),
+
+  new SlashCommandBuilder()
+    .setName('stop')
+    .setDescription('Stop auto system'),
 
   new SlashCommandBuilder()
     .setName('genkey')
-    .setDescription('[ROLE ONLY] generate keys')
+    .setDescription('Generate keys (role only)')
     .addIntegerOption(o =>
-      o.setName('amount').setRequired(true)
+      o.setName('amount')
+        .setDescription('Number of keys')
+        .setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName('list')
-    .setDescription('[ROLE ONLY] list keys'),
+    .setDescription('List all keys (role only)'),
 
   new SlashCommandBuilder()
     .setName('revokekey')
-    .setDescription('[ROLE ONLY] revoke key')
+    .setDescription('Revoke user key (role only)')
     .addUserOption(o =>
-      o.setName('user').setRequired(true)
+      o.setName('user')
+        .setDescription('User')
+        .setRequired(true)
     )
 ].map(c => c.toJSON());
 
@@ -118,20 +149,20 @@ client.on('interactionCreate', async interaction => {
 
   const isOwner = interaction.member?.roles?.cache?.has(OWNER_ROLE_ID);
 
-  // CLAIM
+  // ───── CLAIM
   if (interaction.commandName === 'claim') {
     const key = interaction.options.getString('key').toUpperCase();
     const keys = loadKeys();
     const db = loadDB();
 
     if (db.users[interaction.user.id]?.key)
-      return interaction.reply({ content: 'Already have key', ephemeral: true });
+      return interaction.reply({ content: 'Already claimed a key.', ephemeral: true });
 
     if (!keys[key])
-      return interaction.reply({ content: 'Invalid key', ephemeral: true });
+      return interaction.reply({ content: 'Invalid key.', ephemeral: true });
 
     if (keys[key].claimed)
-      return interaction.reply({ content: 'Already claimed', ephemeral: true });
+      return interaction.reply({ content: 'Key already used.', ephemeral: true });
 
     const expiry = new Date(Date.now() + 10 * 86400000).toISOString();
 
@@ -147,10 +178,10 @@ client.on('interactionCreate', async interaction => {
     saveKeys(keys);
     saveDB(db);
 
-    return interaction.reply({ content: 'Key claimed!', ephemeral: true });
+    return interaction.reply({ content: 'Key claimed successfully.', ephemeral: true });
   }
 
-  // GENKEY (ROLE ONLY)
+  // ───── GENKEY (ROLE ONLY)
   if (interaction.commandName === 'genkey') {
     if (!isOwner)
       return interaction.reply({ content: 'Role only.', ephemeral: true });
@@ -177,7 +208,7 @@ client.on('interactionCreate', async interaction => {
     });
   }
 
-  // LIST (ROLE ONLY)
+  // ───── LIST (ROLE ONLY)
   if (interaction.commandName === 'list') {
     if (!isOwner)
       return interaction.reply({ content: 'Role only.', ephemeral: true });
@@ -191,13 +222,13 @@ client.on('interactionCreate', async interaction => {
     fs.writeFileSync('./list.txt', text);
 
     return interaction.reply({
-      content: 'Key list:',
+      content: 'Key list generated.',
       files: ['./list.txt'],
       ephemeral: true
     });
   }
 
-  // REVOKE (ROLE ONLY)
+  // ───── REVOKE (ROLE ONLY)
   if (interaction.commandName === 'revokekey') {
     if (!isOwner)
       return interaction.reply({ content: 'Role only.', ephemeral: true });
@@ -214,10 +245,103 @@ client.on('interactionCreate', async interaction => {
     });
   }
 
-  // STOP
-  if (interaction.commandName === 'stop') {
-    return interaction.reply({ content: 'Stopped', ephemeral: true });
+  // ───── STATUS
+  if (interaction.commandName === 'status') {
+    const db = loadDB();
+    const cfg = db.users[interaction.user.id]?.config;
+
+    return interaction.reply({
+      content: activeJobs[interaction.user.id]
+        ? `🟢 Running`
+        : '🔴 Stopped',
+      ephemeral: true
+    });
   }
+
+  // ───── STOP
+  if (interaction.commandName === 'stop') {
+    stopJob(interaction.user.id);
+    return interaction.reply({ content: 'Stopped.', ephemeral: true });
+  }
+
+  // ───── PANEL
+  if (interaction.commandName === 'panel') {
+    const db = loadDB();
+    const uid = interaction.user.id;
+
+    if (!db.users[uid])
+      return interaction.reply({ content: 'No key.', ephemeral: true });
+
+    const embed = new EmbedBuilder()
+      .setTitle('Control Panel')
+      .setDescription('Manage your system')
+      .setColor(0x00ff99);
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('setup').setLabel('Setup').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('start').setLabel('Start').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('stop').setLabel('Stop').setStyle(ButtonStyle.Danger)
+    );
+
+    return interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+  }
+
+  // ───── BUTTONS
+  if (interaction.isButton()) {
+
+    if (interaction.customId === 'stop') {
+      stopJob(interaction.user.id);
+      return interaction.reply({ content: 'Stopped.', ephemeral: true });
+    }
+
+    if (interaction.customId === 'setup') {
+      const modal = new ModalBuilder()
+        .setCustomId('setupModal')
+        .setTitle('Setup');
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('channel')
+            .setLabel('Channel ID')
+            .setStyle(TextInputStyle.Short)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('message')
+            .setLabel('Message')
+            .setStyle(TextInputStyle.Paragraph)
+        )
+      );
+
+      return interaction.showModal(modal);
+    }
+
+    if (interaction.customId === 'start') {
+      return interaction.reply({ content: 'Start configured system first.', ephemeral: true });
+    }
+  }
+
+  // ───── MODAL
+  if (interaction.isModalSubmit()) {
+    if (interaction.customId === 'setupModal') {
+
+      const db = loadDB();
+      const uid = interaction.user.id;
+
+      db.users[uid].config = {
+        channelId: interaction.fields.getTextInputValue('channel'),
+        message: interaction.fields.getTextInputValue('message'),
+        userToken: db.users[uid].config?.userToken || "",
+        intervalMin: 30
+      };
+
+      saveDB(db);
+
+      return interaction.reply({ content: 'Saved.', ephemeral: true });
+    }
+  }
+
 });
 
 client.login(BOT_TOKEN);
