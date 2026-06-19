@@ -11,8 +11,8 @@ const fetch = (...a) => import('node-fetch').then(({ default: f }) => f(...a));
 //  FILL THESE IN
 // ─────────────────────────────────────
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const CLIENT_ID = "YOUR_CLIENT_ID_HERE";
-const OWNER_ID  = "YOUR_DISCORD_USER_ID_HERE";
+const CLIENT_ID = "1388360937458761811";
+const OWNER_ID  = "1517636202801529033";
 // ─────────────────────────────────────
 
 const DB_FILE   = "./data.json";
