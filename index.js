@@ -12,16 +12,14 @@ const fetch = (...a) => import('node-fetch').then(({ default: f }) => f(...a));
 // ─────────────────────────────────────
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CLIENT_ID = "1517632985342541864";
-const OWNER_ROLE_ID = "1517636202801529033";
+const OWNER_ROLE_ID = "1517636202801529033"; // ROLE ID
 // ─────────────────────────────────────
 
 const DB_FILE = "./data.json";
 const KEYS_FILE = "./keys.json";
 
 function loadDB() {
-  if (!fs.existsSync(DB_FILE)) {
-    fs.writeFileSync(DB_FILE, JSON.stringify({ users: {} }, null, 2));
-  }
+  if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ users: {} }, null, 2));
   return JSON.parse(fs.readFileSync(DB_FILE));
 }
 
@@ -30,9 +28,7 @@ function saveDB(db) {
 }
 
 function loadKeys() {
-  if (!fs.existsSync(KEYS_FILE)) {
-    fs.writeFileSync(KEYS_FILE, JSON.stringify({}, null, 2));
-  }
+  if (!fs.existsSync(KEYS_FILE)) fs.writeFileSync(KEYS_FILE, JSON.stringify({}, null, 2));
   return JSON.parse(fs.readFileSync(KEYS_FILE));
 }
 
@@ -63,27 +59,10 @@ async function sendSelfMsg(userToken, channelId, message) {
 
     const data = await res.json();
     if (!res.ok) return { ok: false, error: data.message || JSON.stringify(data) };
-
     return { ok: true, id: data.id };
   } catch (e) {
     return { ok: false, error: e.message };
   }
-}
-
-function scheduleJob(uid, cfg) {
-  stopJob(uid);
-
-  const run = async () => {
-    await sendSelfMsg(cfg.userToken, cfg.channelId, cfg.message);
-
-    const base = cfg.intervalMin * 60000;
-    const jitter = (Math.random() * 4 - 2) * 60000;
-
-    activeJobs[uid].timer = setTimeout(run, Math.max(base + jitter, 60000));
-  };
-
-  activeJobs[uid] = { ...cfg, timer: null };
-  run();
 }
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
@@ -94,37 +73,31 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const commands = [
   new SlashCommandBuilder()
     .setName('claim')
-    .setDescription('Claim your license key')
+    .setDescription('Claim key')
     .addStringOption(o =>
-      o.setName('key')
-        .setDescription('Your key')
-        .setRequired(true)
+      o.setName('key').setRequired(true)
     ),
 
-  new SlashCommandBuilder().setName('panel').setDescription('Open panel'),
-  new SlashCommandBuilder().setName('status').setDescription('Check status'),
-  new SlashCommandBuilder().setName('stop').setDescription('Stop auto-adv'),
+  new SlashCommandBuilder().setName('panel').setDescription('Panel'),
+  new SlashCommandBuilder().setName('status').setDescription('Status'),
+  new SlashCommandBuilder().setName('stop').setDescription('Stop'),
 
   new SlashCommandBuilder()
-    .setName('genkeys')
-    .setDescription('[Owner] generate keys')
+    .setName('genkey')
+    .setDescription('[ROLE ONLY] generate keys')
     .addIntegerOption(o =>
-      o.setName('amount')
-        .setDescription('amount')
-        .setRequired(true)
+      o.setName('amount').setRequired(true)
     ),
 
   new SlashCommandBuilder()
-    .setName('listkeys')
-    .setDescription('[Owner] list keys'),
+    .setName('list')
+    .setDescription('[ROLE ONLY] list keys'),
 
   new SlashCommandBuilder()
     .setName('revokekey')
-    .setDescription('[Owner] revoke key')
+    .setDescription('[ROLE ONLY] revoke key')
     .addUserOption(o =>
-      o.setName('user')
-        .setDescription('user')
-        .setRequired(true)
+      o.setName('user').setRequired(true)
     )
 ].map(c => c.toJSON());
 
@@ -136,140 +109,114 @@ client.once('ready', async () => {
   const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
 
-  console.log('Slash commands registered');
+  console.log('Commands registered');
 });
 
 // ─────────────────────────────────────
-// MAIN HANDLER
-// ─────────────────────────────────────
+
 client.on('interactionCreate', async interaction => {
 
   const isOwner = interaction.member?.roles?.cache?.has(OWNER_ROLE_ID);
 
-  try {
+  // CLAIM
+  if (interaction.commandName === 'claim') {
+    const key = interaction.options.getString('key').toUpperCase();
+    const keys = loadKeys();
+    const db = loadDB();
 
-    // ───── CLAIM (FIXED SAFE)
-    if (interaction.isChatInputCommand() && interaction.commandName === 'claim') {
-      const keyInput = interaction.options.getString('key');
+    if (db.users[interaction.user.id]?.key)
+      return interaction.reply({ content: 'Already have key', ephemeral: true });
 
-      if (!keyInput)
-        return interaction.reply({ content: 'No key provided.', ephemeral: true });
+    if (!keys[key])
+      return interaction.reply({ content: 'Invalid key', ephemeral: true });
 
-      const key = keyInput.trim().toUpperCase();
-      const keys = loadKeys();
-      const db = loadDB();
-      const uid = interaction.user.id;
+    if (keys[key].claimed)
+      return interaction.reply({ content: 'Already claimed', ephemeral: true });
 
-      if (db.users[uid]?.key)
-        return interaction.reply({ content: 'You already have a key.', ephemeral: true });
+    const expiry = new Date(Date.now() + 10 * 86400000).toISOString();
 
-      const data = keys[key];
+    keys[key] = {
+      claimed: true,
+      claimedBy: interaction.user.id,
+      claimedAt: new Date().toISOString(),
+      expiry
+    };
 
-      if (!data)
-        return interaction.reply({ content: 'Invalid key.', ephemeral: true });
+    db.users[interaction.user.id] = { key, expiry, config: null };
 
-      if (data.claimed)
-        return interaction.reply({ content: 'Key already claimed.', ephemeral: true });
+    saveKeys(keys);
+    saveDB(db);
 
-      const expiry = new Date(Date.now() + 10 * 86400000).toISOString();
+    return interaction.reply({ content: 'Key claimed!', ephemeral: true });
+  }
 
-      keys[key] = {
-        claimed: true,
-        claimedBy: uid,
-        claimedAt: new Date().toISOString(),
-        expiry
-      };
+  // GENKEY (ROLE ONLY)
+  if (interaction.commandName === 'genkey') {
+    if (!isOwner)
+      return interaction.reply({ content: 'Role only.', ephemeral: true });
 
-      saveKeys(keys);
+    const amount = Math.min(interaction.options.getInteger('amount'), 100);
+    const keys = loadKeys();
+    const out = [];
 
-      db.users[uid] = { key, expiry, config: null };
-      saveDB(db);
+    for (let i = 0; i < amount; i++) {
+      const r = () => Math.random().toString(36).substring(2, 6).toUpperCase();
+      const key = `PIKE-${r()}-${r()}-${r()}`;
 
-      return interaction.reply({
-        content: '✅ Key claimed successfully!',
-        ephemeral: true
-      });
+      keys[key] = { claimed: false, claimedBy: null, expiry: null };
+      out.push(key);
     }
 
-    // ───── OWNER CHECK COMMANDS
-    const ownerOnly = (msg) =>
-      interaction.reply({ content: msg, ephemeral: true });
+    saveKeys(keys);
+    fs.writeFileSync('./keys.txt', out.join('\n'));
 
-    if (interaction.isChatInputCommand() && interaction.commandName === 'genkeys') {
-      if (!isOwner) return ownerOnly('Owner only.');
+    return interaction.reply({
+      content: `Generated ${amount} keys`,
+      files: ['./keys.txt'],
+      ephemeral: true
+    });
+  }
 
-      const amount = Math.min(interaction.options.getInteger('amount'), 100);
-      const keys = loadKeys();
-      const out = [];
+  // LIST (ROLE ONLY)
+  if (interaction.commandName === 'list') {
+    if (!isOwner)
+      return interaction.reply({ content: 'Role only.', ephemeral: true });
 
-      for (let i = 0; i < amount; i++) {
-        const r = () => Math.random().toString(36).substring(2, 6).toUpperCase();
-        const key = `PIKE-${r()}-${r()}-${r()}`;
-        keys[key] = { claimed: false, claimedBy: null, expiry: null };
-        out.push(key);
-      }
+    const keys = loadKeys();
 
-      saveKeys(keys);
-      fs.writeFileSync('./keys.txt', out.join('\n'));
+    const text = Object.entries(keys)
+      .map(([k, v]) => `${k} | ${v.claimed ? 'CLAIMED' : 'FREE'}`)
+      .join('\n');
 
-      return interaction.reply({
-        content: `Generated ${amount} keys`,
-        files: ['./keys.txt'],
-        ephemeral: true
-      });
-    }
+    fs.writeFileSync('./list.txt', text);
 
-    if (interaction.isChatInputCommand() && interaction.commandName === 'listkeys') {
-      if (!isOwner) return ownerOnly('Owner only.');
+    return interaction.reply({
+      content: 'Key list:',
+      files: ['./list.txt'],
+      ephemeral: true
+    });
+  }
 
-      const keys = loadKeys();
+  // REVOKE (ROLE ONLY)
+  if (interaction.commandName === 'revokekey') {
+    if (!isOwner)
+      return interaction.reply({ content: 'Role only.', ephemeral: true });
 
-      const text = Object.entries(keys)
-        .map(([k, v]) => `${k} | ${v.claimed ? 'CLAIMED' : 'FREE'}`)
-        .join('\n');
+    const user = interaction.options.getUser('user');
+    const db = loadDB();
 
-      fs.writeFileSync('./list.txt', text);
+    delete db.users[user.id];
+    saveDB(db);
 
-      return interaction.reply({
-        content: 'Key list:',
-        files: ['./list.txt'],
-        ephemeral: true
-      });
-    }
+    return interaction.reply({
+      content: `Revoked key from ${user.tag}`,
+      ephemeral: true
+    });
+  }
 
-    if (interaction.isChatInputCommand() && interaction.commandName === 'revokekey') {
-      if (!isOwner) return ownerOnly('Owner only.');
-
-      const user = interaction.options.getUser('user');
-      const db = loadDB();
-
-      if (!db.users[user.id])
-        return interaction.reply({ content: 'No key found.', ephemeral: true });
-
-      delete db.users[user.id];
-      saveDB(db);
-
-      return interaction.reply({
-        content: `Revoked key from ${user.tag}`,
-        ephemeral: true
-      });
-    }
-
-    // ───── STOP (SAFE)
-    if (interaction.commandName === 'stop') {
-      stopJob(interaction.user.id);
-      return interaction.reply({ content: 'Stopped.', ephemeral: true });
-    }
-
-  } catch (err) {
-    console.error(err);
-
-    if (!interaction.replied) {
-      return interaction.reply({
-        content: 'Error occurred.',
-        ephemeral: true
-      });
-    }
+  // STOP
+  if (interaction.commandName === 'stop') {
+    return interaction.reply({ content: 'Stopped', ephemeral: true });
   }
 });
 
